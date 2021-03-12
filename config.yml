@@ -1,0 +1,4 @@
+nodes:
+  - name: Your Airflow Name
+    remote_ip: 192.168.3.152:8080
+    nginx_ip: 192.168.3.152:8080

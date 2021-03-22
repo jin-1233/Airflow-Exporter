@@ -34,11 +34,12 @@ User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 # 获取失败任务列表
 def get_faild_task_list(url):
+    
     faild_task_page_html = requests.get(url=url, headers=headers, timeout=6).text
     p = etree.HTML(faild_task_page_html)
     failed_task_list = p.xpath('//td[@class="col-task_id"]/span/a[1]/text()')
     task_list = list(set(failed_task_list))
-
+    
     return task_list
 
 
@@ -46,15 +47,25 @@ def get_faild_task_list(url):
 def airflow_metrics():
     registry = CollectorRegistry()
     airflow_monitor = Gauge('airflow_monitor', 'a monitor of airflow', ['machine', 'remote_ip', 'dag', 'task'], registry=registry)
+    airflow_count = Gauge('airflow_count', 'airflow run count', ['status', 'machine', 'remote_ip'], registry=registry)
+    airflow_status = Gauge('airflow_status', 'airflow run status', ['machine', 'remote_ip'], registry=registry)
     start_time = time.time()
     for idx, node in enumerate(node_list):
+        On_count = 0
+        Off_count = 0
         page_time = time.time()
         nginx_ip = node["nginx_ip"]
         node_name = node["name"]
         remote_ip = node["remote_ip"]
         dag_stats_url = f'http://{nginx_ip}/admin/airflow/dag_stats'
-        node_url = f'http://{nginx_ip}/admin/'
-        html = requests.get(url=node_url, headers=headers, timeout=6).text
+        node_url=f'http://{nginx_ip}/admin/'
+        try:
+            html = requests.get(url=node_url, headers=headers, timeout=6).text
+        except Exception as e:
+            logging.info(f"Requests Error: {e}")
+            airflow_status.labels(machine=node_name, remote_ip=remote_ip).set(0)
+            continue
+        airflow_status.labels(machine=node_name, remote_ip=remote_ip).set(1)
         first_time = time.time()
         try:
             dag_response = requests.get(url=dag_stats_url, headers=headers, timeout=6)
@@ -66,20 +77,21 @@ def airflow_metrics():
             logging.info(f"node_index: {idx} \nnginx_ip: {nginx_ip}")
             logging.info(e)
             logging.info("================End===============")
-        # logging.info(f"请求node：{time.time() - first_time}")
+            continue
+        logging.info(f"请求node：{time.time() - first_time}")
         p = etree.HTML(html)
         second_for_start = time.time()
         for dag_id in dag_json.keys():
-            # for state_dict in dag_json[dag_id]:
             type_list = p.xpath(f'//input[@id="toggle-{dag_id}"]/@checked')
             if not type_list:
+                Off_count += 1
                 continue
             if 'checked' in type_list:
+                On_count += 1
                 state_dict = dag_json[dag_id][-1]
                 if state_dict['state'] == 'failed':
                     failed_count = state_dict['count']
                     dag_name = state_dict['dag_id']
-
                     if failed_count:
                         faild_task_url = f"http://{nginx_ip}/admin/taskinstance/?flt1_dag_id_equals={dag_name}&flt2_state_equals=failed"
                         start = time.time()
@@ -87,11 +99,12 @@ def airflow_metrics():
                         logging.info(f"get_faild_task_list 运行时间: {time.time() - start}")
                         for task in task_list:
                             airflow_monitor.labels(machine=node_name, remote_ip=remote_ip, dag=dag_name, task=task).set(failed_count)
-        # logging.info(f"second_for 运行时间：{time.time() - second_for_start}")
-        # logging.info(f"采集完node：{time.time() - page_time}")
-    logging.info(f"运行时间：{time.time() - start_time}")
+        logging.info(f"second_for 运行时间：{time.time() - second_for_start}")
+        logging.info(f"采集完node：{time.time() - page_time}")
+        airflow_count.labels(status="On", machine=node_name, remote_ip=remote_ip).set(On_count)
+        airflow_count.labels(status="Off", machine=node_name, remote_ip=remote_ip).set(Off_count)
+    logging.info(f"运行时间：{time.time()-start_time}")
     return Response(generate_latest(registry), mimetype='text/plain')
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9116)
